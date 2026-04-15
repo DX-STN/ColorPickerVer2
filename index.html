@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>カラーピッカー簡易版 ver2（バックアップ付き）</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 16px;
+    }
+    #canvasWrapper {
+      position: relative;
+      display: inline-block;
+      border: 1px solid #ccc;
+      margin-bottom: 8px;
+    }
+    #imageCanvas {
+      display: block;
+      max-width: 100%;
+    }
+    #pickedColorPreview {
+      width: 40px;
+      height: 40px;
+      border: 1px solid #000;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+    #pickedColorInfo {
+      display: inline-block;
+      vertical-align: middle;
+      font-size: 14px;
+    }
+    #savedColors {
+      margin-top: 16px;
+      border-top: 1px solid #ccc;
+      padding-top: 8px;
+    }
+    .color-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+    .color-swatch {
+      width: 24px;
+      height: 24px;
+      border: 1px solid #000;
+      margin-right: 6px;
+      flex-shrink: 0;
+    }
+    .color-meta {
+      white-space: pre;
+    }
+    label {
+      font-size: 13px;
+    }
+    input[type="text"] {
+      font-size: 13px;
+      padding: 2px 4px;
+    }
+    select {
+      font-size: 13px;
+      padding: 2px 4px;
+      margin-right: 4px;
+    }
+    button {
+      font-size: 13px;
+      padding: 2px 8px;
+      margin-left: 4px;
+    }
+    #backupArea {
+      margin-top: 16px;
+      border-top: 1px dashed #999;
+      padding-top: 8px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <h2>カラーピッカー簡易版 ver2（バックアップ付き）</h2>
+
+  <p>画像を読み込み、キャンバスをクリックして色を選びます。選んだ色はローカルストレージに保存されます。</p>
+
+  <input type="file" id="imageInput" accept="image/*">
+  <br><br>
+
+  <div id="canvasWrapper">
+    <canvas id="imageCanvas" width="400" height="300"></canvas>
+  </div>
+
+  <div style="margin-top:8px;">
+    <div id="pickedColorPreview"></div>
+    <div id="pickedColorInfo">色未選択</div>
+  </div>
+
+  <div style="margin-top:8px;">
+    <label>テーマ名（任意）:
+      <input type="text" id="themeInput" placeholder="例: 春の草">
+    </label>
+    <button id="saveColorBtn" disabled>この色を保存</button>
+  </div>
+
+  <div style="margin-top:12px;">
+    <label>表示モード:
+      <select id="viewMode">
+        <option value="image">画像ごと</option>
+        <option value="theme">テーマごと</option>
+      </select>
+    </label>
+
+    <span id="viewFilterLabel">画像ID:</span>
+    <input type="text" id="viewFilterValue" size="12" placeholder="例: 1">
+    <button id="reloadBtn">色を読み込み</button>
+  </div>
+
+  <div id="savedColors">
+    <h3>保存された色</h3>
+    <div id="savedColorsList"></div>
+  </div>
+
+  <div id="backupArea">
+    <h3>バックアップと復元</h3>
+    <p>
+      アプリ内の色データは、ブラウザのサイトデータ削除や端末の操作で消える可能性があります。<br>
+      必要に応じてバックアップを保存し、必要なときに「バックアップから復元」を行ってください。
+    </p>
+    <button id="backupBtn">バックアップを保存</button>
+    <button id="restoreBtn">バックアップから復元</button>
+    <input type="file" id="restoreFile" accept="application/json" style="display:none;">
+    <div id="backupInfo" style="margin-top:4px; color:#555;"></div>
+    <div id="restoreInfo" style="margin-top:4px; color:#555;"></div>
+  </div>
+
+  <script>
+    /***********************
+     * 設定・キー名
+     ***********************/
+    const LS_COLORS_KEY = 'picked_colors_v1';
+    const LS_NEXT_COLOR_ID_KEY = 'next_color_id_v1';
+
+    /***********************
+     * DOM取得
+     ***********************/
+    const imageInput = document.getElementById('imageInput');
+    const imageCanvas = document.getElementById('imageCanvas');
+    const ctx = imageCanvas.getContext('2d');
+
+    const pickedColorPreview = document.getElementById('pickedColorPreview');
+    const pickedColorInfo = document.getElementById('pickedColorInfo');
+    const themeInput = document.getElementById('themeInput');
+    const saveColorBtn = document.getElementById('saveColorBtn');
+
+    const viewModeSelect = document.getElementById('viewMode');
+    const viewFilterLabel = document.getElementById('viewFilterLabel');
+    const viewFilterValue = document.getElementById('viewFilterValue');
+    const reloadBtn = document.getElementById('reloadBtn');
+    const savedColorsList = document.getElementById('savedColorsList');
+
+    const backupBtn = document.getElementById('backupBtn');
+    const restoreBtn = document.getElementById('restoreBtn');
+    const restoreFileInput = document.getElementById('restoreFile');
+    const backupInfo = document.getElementById('backupInfo');
+    const restoreInfo = document.getElementById('restoreInfo');
+
+    /***********************
+     * 状態
+     ***********************/
+    let currentImageId = 1;
+    let lastPickedColor = null;
+
+    /***********************
+     * ユーティリティ
+     ***********************/
+    function rgbToHex(r, g, b) {
+      const toHex = v => v.toString(16).padStart(2, '0');
+      return '#' + toHex(r) + toHex(g) + toHex(b);
+    }
+
+    function loadColorsFromLS() {
+      const json = localStorage.getItem(LS_COLORS_KEY);
+      if (!json) return [];
+      try {
+        const arr = JSON.parse(json);
+        if (Array.isArray(arr)) return arr;
+        return [];
+      } catch (e) {
+        console.error('loadColorsFromLS parse error', e);
+        return [];
+      }
+    }
+
+    function saveColorsToLS(colors) {
+      localStorage.setItem(LS_COLORS_KEY, JSON.stringify(colors));
+    }
+
+    function getNextColorId() {
+      const raw = localStorage.getItem(LS_NEXT_COLOR_ID_KEY);
+      let id = raw ? parseInt(raw, 10) : 1;
+      if (Number.isNaN(id) || id <= 0) id = 1;
+      localStorage.setItem(LS_NEXT_COLOR_ID_KEY, String(id + 1));
+      return id;
+    }
+
+    function getBackupFileName() {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, '0');
+      const d = String(now.getDate()).padStart(2, '0');
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      return `ColorApp-Backup-${y}${m}${d}-${hh}${mm}.json`;
+    }
+
+    /***********************
+     * 画像読み込み
+     ***********************/
+    imageInput.addEventListener('change', e => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      const img = new Image();
+      img.onload = () => {
+        imageCanvas.width = img.width;
+        imageCanvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+
+        currentImageId = Date.now();
+
+        pickedColorPreview.style.background = 'transparent';
+        pickedColorInfo.textContent = '画像をクリックして色を選んでください';
+        lastPickedColor = null;
+        saveColorBtn.disabled = true;
+
+        if (viewModeSelect.value === 'image') {
+          viewFilterValue.value = String(currentImageId);
+        }
+      };
+      img.src = URL.createObjectURL(file);
+    });
+
+    /***********************
+     * キャンバスクリックで色取得
+     ***********************/
+    imageCanvas.addEventListener('click', e => {
+      const rect = imageCanvas.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * (imageCanvas.width / rect.width));
+      const y = Math.floor((e.clientY - rect.top) * (imageCanvas.height / rect.height));
+
+      const imgData = ctx.getImageData(x, y, 1, 1).data;
+      const r = imgData[0];
+      const g = imgData[1];
+      const b = imgData[2];
+      const hex = rgbToHex(r, g, b);
+
+      lastPickedColor = { r, g, b, hex };
+
+      pickedColorPreview.style.background = hex;
+      pickedColorInfo.textContent = `RGB(${r}, ${g}, ${b})  ${hex}`;
+      saveColorBtn.disabled = false;
+    });
+
+    /***********************
+     * 色データ保存
+     ***********************/
+    saveColorBtn.addEventListener('click', () => {
+      if (!lastPickedColor) return;
+
+      const colors = loadColorsFromLS();
+      const id = getNextColorId();
+      const themeName = themeInput.value.trim();
+      const now = new Date().toISOString();
+
+      const colorRecord = {
+        id,
+        image_id: currentImageId,
+        r: lastPickedColor.r,
+        g: lastPickedColor.g,
+        b: lastPickedColor.b,
+        hex: lastPickedColor.hex,
+        theme_name: themeName || '',
+        picked_at: now
+      };
+
+      colors.push(colorRecord);
+      saveColorsToLS(colors);
+
+      alert('色を保存しました');
+      renderSavedColors();
+    });
+
+    /***********************
+     * 表示モード切り替え
+     ***********************/
+    viewModeSelect.addEventListener('change', () => {
+      const mode = viewModeSelect.value;
+      if (mode === 'image') {
+        viewFilterLabel.textContent = '画像ID:';
+        viewFilterValue.value = currentImageId ? String(currentImageId) : '';
+      } else {
+        viewFilterLabel.textContent = 'テーマ名:';
+        viewFilterValue.value = '';
+      }
+    });
+
+    reloadBtn.addEventListener('click', () => {
+      renderSavedColors();
+    });
+
+    /***********************
+     * 保存された色の表示
+     ***********************/
+    function renderSavedColors() {
+      const colors = loadColorsFromLS();
+      const mode = viewModeSelect.value;
+      const filter = viewFilterValue.value.trim();
+
+      let filtered = colors;
+
+      if (mode === 'image') {
+        if (filter) {
+          const imgId = parseInt(filter, 10);
+          if (!Number.isNaN(imgId)) {
+            filtered = colors.filter(c => c.image_id === imgId);
+          } else {
+            filtered = [];
+          }
+        }
+      } else {
+        if (filter) {
+          filtered = colors.filter(
+            c => (c.theme_name || '').toLowerCase() === filter.toLowerCase()
+          );
+        }
+      }
+
+      savedColorsList.innerHTML = '';
+
+      if (filtered.length === 0) {
+        savedColorsList.textContent = '該当する色はまだ保存されていません。';
+        return;
+      }
+
+      filtered.forEach(c => {
+        const div = document.createElement('div');
+        div.className = 'color-item';
+
+        const swatch = document.createElement('div');
+        swatch.className = 'color-swatch';
+        swatch.style.background = c.hex;
+
+        const meta = document.createElement('div');
+        meta.className = 'color-meta';
+        meta.textContent =
+          `ID:${c.id}  img:${c.image_id}  ${c.hex}  ` +
+          `theme:"${c.theme_name || ''}"  ` +
+          `${c.picked_at}`;
+
+        div.appendChild(swatch);
+        div.appendChild(meta);
+        savedColorsList.appendChild(div);
+      });
+    }
+
+    /***********************
+     * バックアップ出力
+     ***********************/
+    function exportColorsToFile() {
+      const json = localStorage.getItem(LS_COLORS_KEY) || '[]';
+      const fileName = getBackupFileName();
+
+      backupInfo.textContent =
+        `色データのバックアップを「${fileName}」という名前で保存します。` +
+        ` このファイルを消さないように保管してください。`;
+
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    backupBtn.addEventListener('click', () => {
+      const ok = confirm(
+        'アプリ内の色データは端末やブラウザの操作で消える可能性があります。\n' +
+        'バックアップ用のファイルを保存しますか？'
+      );
+      if (!ok) return;
+      exportColorsToFile();
+    });
+
+    /***********************
+     * バックアップから復元
+     ***********************/
+    function importColorsFromFile(file) {
+      const reader = new FileReader();
+
+      reader.onload = (e) => {
+        try {
+          const text = e.target.result;
+          const data = JSON.parse(text);
+
+          if (!Array.isArray(data)) {
+            alert('このファイルは色データのバックアップ形式ではありません。');
+            return;
+          }
+
+          const ok = confirm(
+            '選択したバックアップから色データを復元します。\n' +
+            '現在の色データは上書きされますがよろしいですか？'
+          );
+          if (!ok) return;
+
+          localStorage.setItem(LS_COLORS_KEY, JSON.stringify(data));
+          restoreInfo.textContent = 'バックアップから色データを復元しました。';
+
+          alert('復元が完了しました。');
+          renderSavedColors();
+        } catch (err) {
+          console.error(err);
+          alert('バックアップファイルの読み込み中にエラーが発生しました。');
+        }
+      };
+
+      reader.readAsText(file, 'utf-8');
+    }
+
+    restoreBtn.addEventListener('click', () => {
+      restoreFileInput.value = '';
+      restoreFileInput.click();
+    });
+
+    restoreFileInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+
+      restoreInfo.textContent = `選択されたファイル: ${file.name}`;
+      importColorsFromFile(file);
+    });
+
+    /***********************
+     * 初期表示
+     ***********************/
+    window.addEventListener('load', () => {
+      viewModeSelect.value = 'image';
+      viewFilterLabel.textContent = '画像ID:';
+      viewFilterValue.value = '';
+      renderSavedColors();
+    });
+  </script>
+</body>
+</html>
